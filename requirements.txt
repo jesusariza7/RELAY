@@ -3,3 +3,4 @@ uvicorn
 web3
 python-dotenv
 requests
+python-multipart
