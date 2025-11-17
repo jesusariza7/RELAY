@@ -3,6 +3,7 @@ from web3 import Web3
 from typing import Optional
 import os
 import requests
+import traceback
 
 app = FastAPI()
 
@@ -27,7 +28,7 @@ CHAIN_ID = int(CHAIN_ID_STR)
 
 PINATA_JWT = os.getenv("PINATA_JWT")
 
-# ABI con función storeReading(...)
+# ABI
 ABI_JSON = [
     {
         "inputs": [
@@ -44,15 +45,17 @@ ABI_JSON = [
     }
 ]
 
-# ================== CONFIGURACIÓN PINATA ==================
 PINATA_URL = "https://api.pinata.cloud/pinning/pinJSONToIPFS"
 
 # ================== INICIALIZACIÓN WEB3 ==================
 w3 = Web3(Web3.HTTPProvider(RPC_URL))
 if not w3.is_connected():
     raise RuntimeError("No se pudo conectar a Sepolia. Revisa RPC_URL / Internet.")
+
 account = w3.eth.account.from_key(PRIVATE_KEY)
 print("[INFO] Relayer usando cuenta:", account.address)
+print("[INFO] Saldo actual:", w3.eth.get_balance(account.address))
+
 contract = w3.eth.contract(address=CONTRACT_ADDRESS, abi=ABI_JSON)
 
 
@@ -65,16 +68,24 @@ def subir_a_pinata(payload: dict) -> Optional[str]:
     if not PINATA_JWT:
         print("[WARN] PINATA_JWT vacío, no se subirá a IPFS.")
         return None
+
     headers = {
         "Authorization": f"Bearer {PINATA_JWT}",
         "Content-Type": "application/json",
     }
+
+    print("[DEBUG] Subiendo a Pinata:", payload)
+
     try:
         r = requests.post(PINATA_URL, json=payload, headers=headers, timeout=30)
+        print("[DEBUG] Respuesta completa de Pinata:", r.text)
+
         r.raise_for_status()
         cid = r.json().get("IpfsHash")
+
         print("[INFO] Subido a Pinata, CID:", cid)
         return cid
+
     except Exception as e:
         print("[ERROR] Error subiendo a Pinata:", e)
         return None
@@ -90,6 +101,7 @@ async def recibir_lectura(req: Request):
     print("[DEBUG] Payload recibido:", data)
     device_id = data.get("device_id", "unknown-device")
 
+    # Validación de campos
     if "temperature" not in data:
         raise HTTPException(status_code=400, detail="Campo 'temperature' requerido")
     if "humidity" not in data:
@@ -97,6 +109,7 @@ async def recibir_lectura(req: Request):
     if "timestamp_ms" not in data:
         raise HTTPException(status_code=400, detail="Campo 'timestamp_ms' requerido")
 
+    # Conversión de tipos
     try:
         temp_c = float(data["temperature"])
         hum = float(data["humidity"])
@@ -104,11 +117,11 @@ async def recibir_lectura(req: Request):
     except (ValueError, TypeError) as e:
         raise HTTPException(status_code=400, detail=f"Error en tipos de datos: {e}")
 
-    # Escalamiento a enteros
+    # Escalamiento
     temp_times10 = int(round(temp_c * 10))
     hum_times10 = int(round(hum * 10))
 
-    # 1. Subir JSON a Pinata
+    # Subir a Pinata
     cid = subir_a_pinata({
         "device_id": device_id,
         "temperature_c": temp_c,
@@ -116,9 +129,20 @@ async def recibir_lectura(req: Request):
         "timestamp_ms": timestamp_ms,
     }) or ""
 
-    # 2. Construir y enviar transacción storeReading(...)
+    # ======== DEBUG ANTES DE ENVIAR A LA BLOCKCHAIN ==========
+    print("====== DATOS QUE SE ENVIAN AL CONTRATO ======")
+    print("device_id:", device_id)
+    print("temp_times10:", temp_times10)
+    print("hum_times10:", hum_times10)
+    print("timestamp_ms:", timestamp_ms)
+    print("cid:", cid)
+    print("================================================")
+    # =========================================================
+
     try:
         nonce = w3.eth.get_transaction_count(account.address)
+        print("[INFO] Nonce actual:", nonce)
+
         tx = contract.functions.storeReading(
             device_id, temp_times10, hum_times10, timestamp_ms, cid
         ).build_transaction(
@@ -130,20 +154,28 @@ async def recibir_lectura(req: Request):
                 "chainId": CHAIN_ID,
             }
         )
+
+        print("[DEBUG] TX Construida:", tx)
+
         signed_tx = w3.eth.account.sign_transaction(tx, private_key=PRIVATE_KEY)
-        # Web3.py 7.x usa 'raw_transaction'
+
         tx_hash = w3.eth.send_raw_transaction(signed_tx.raw_transaction)
         print("[INFO] Tx enviada:", tx_hash.hex())
+
         receipt = w3.eth.wait_for_transaction_receipt(tx_hash)
         print("[INFO] Tx minada en bloque:", receipt.blockNumber)
+
         return {
             "status": "ok",
             "tx_hash": tx_hash.hex(),
             "block": receipt.blockNumber,
             "cid": cid,
         }
+
     except Exception as e:
-        print("[ERROR] Error en transacción blockchain:", e)
+        print("[ERROR] Exception completa al enviar tx:")
+        traceback.print_exc()
+
         raise HTTPException(
             status_code=500,
             detail=f"Error al enviar transacción: {str(e)}"
