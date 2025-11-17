@@ -28,15 +28,14 @@ CHAIN_ID = int(CHAIN_ID_STR)
 
 PINATA_JWT = os.getenv("PINATA_JWT")
 
-# ABI
+# ABI CORRECTO (SIN CID)
 ABI_JSON = [
     {
         "inputs": [
             {"internalType": "string", "name": "deviceId", "type": "string"},
             {"internalType": "int16", "name": "temperatureTimes10", "type": "int16"},
             {"internalType": "uint16", "name": "humidityTimes10", "type": "uint16"},
-            {"internalType": "uint256", "name": "timestampMs", "type": "uint256"},
-            {"internalType": "string", "name": "cid", "type": "string"},
+            {"internalType": "uint256", "name": "timestampMs", "type": "uint256"}
         ],
         "name": "storeReading",
         "outputs": [],
@@ -50,7 +49,7 @@ PINATA_URL = "https://api.pinata.cloud/pinning/pinJSONToIPFS"
 # ================== INICIALIZACIÓN WEB3 ==================
 w3 = Web3(Web3.HTTPProvider(RPC_URL))
 if not w3.is_connected():
-    raise RuntimeError("No se pudo conectar a Sepolia. Revisa RPC_URL / Internet.")
+    raise RuntimeError("No se pudo conectar al nodo RPC. Revisa RPC_URL / Internet.")
 
 account = w3.eth.account.from_key(PRIVATE_KEY)
 print("[INFO] Relayer usando cuenta:", account.address)
@@ -101,7 +100,7 @@ async def recibir_lectura(req: Request):
     print("[DEBUG] Payload recibido:", data)
     device_id = data.get("device_id", "unknown-device")
 
-    # Validación de campos
+    # Validación de campos obligatorios
     if "temperature" not in data:
         raise HTTPException(status_code=400, detail="Campo 'temperature' requerido")
     if "humidity" not in data:
@@ -117,7 +116,7 @@ async def recibir_lectura(req: Request):
     except (ValueError, TypeError) as e:
         raise HTTPException(status_code=400, detail=f"Error en tipos de datos: {e}")
 
-    # Escalamiento
+    # Escalamiento para el contrato
     temp_times10 = int(round(temp_c * 10))
     hum_times10 = int(round(hum * 10))
 
@@ -129,22 +128,24 @@ async def recibir_lectura(req: Request):
         "timestamp_ms": timestamp_ms,
     }) or ""
 
-    # ======== DEBUG ANTES DE ENVIAR A LA BLOCKCHAIN ==========
+    # Debug
     print("====== DATOS QUE SE ENVIAN AL CONTRATO ======")
     print("device_id:", device_id)
     print("temp_times10:", temp_times10)
     print("hum_times10:", hum_times10)
     print("timestamp_ms:", timestamp_ms)
-    print("cid:", cid)
+    print("CID guardado en Pinata:", cid)
     print("================================================")
-    # =========================================================
 
     try:
         nonce = w3.eth.get_transaction_count(account.address)
         print("[INFO] Nonce actual:", nonce)
 
         tx = contract.functions.storeReading(
-            device_id, temp_times10, hum_times10, timestamp_ms, cid
+            device_id,
+            temp_times10,
+            hum_times10,
+            timestamp_ms
         ).build_transaction(
             {
                 "from": account.address,
@@ -175,7 +176,6 @@ async def recibir_lectura(req: Request):
     except Exception as e:
         print("[ERROR] Exception completa al enviar tx:")
         traceback.print_exc()
-
         raise HTTPException(
             status_code=500,
             detail=f"Error al enviar transacción: {str(e)}"
