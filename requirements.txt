@@ -4,3 +4,4 @@ web3
 python-dotenv
 requests
 python-multipart
+yt-dlp
